@@ -308,7 +308,7 @@ CUDA_VISIBLE_DEVICES=2 python search_agent/oss_client.py \
     --model-name lightonai/Reason-ModernColBERT \
     --query-length 512 \
     --get-document \
-    --output-dir runs/pylate_oss-gpt-20b-${REASONING_EFFORT}-120b-reason \
+    --output-dir runs/pylate_oss-gpt-${REASONING_EFFORT}-120b-reason \
     --query topics-qrels/queries.tsv \
     --max-tokens 20000 \
     --num-threads ${NUM_THREADS}
