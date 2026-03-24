@@ -22,7 +22,7 @@ from utils import extract_retrieved_docids_from_result
 def build_request(
     query: str,
     model: str,
-    max_tokens: int,
+    max_tokens: int | None = None,
     system_prompt: str | None = None,
     reasoning_effort: str | None = None,
     mcp_url: str | None = None,
@@ -37,11 +37,13 @@ def build_request(
 
     body = {
         "model": model,
-        "max_output_tokens": max_tokens,
         "input": formatted_query,
         "tool_choice": "auto",
         "truncation": "auto",
     }
+
+    if max_tokens is not None:
+        body["max_output_tokens"] = max_tokens
 
     if not model.lower().startswith("o"):
         if temperature is not None:
@@ -257,8 +259,8 @@ def main():
     parser.add_argument(
         "--max_tokens",
         type=int,
-        default=10000,
-        help="Max tokens to generate (default: %(default)s)",
+        default=None,
+        help="Max tokens to generate (default: no limit)",
     )
     parser.add_argument(
         "--mcp-url",
