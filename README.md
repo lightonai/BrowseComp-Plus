@@ -226,3 +226,182 @@ If you find this work useful, please cite:
       journal={arXiv preprint arXiv:2508.06600}
 }
 ```
+
+# Reproducing Reason-ModernColBERT results
+
+# Creating indexes
+
+You can run this with your own param/model
+```python
+python scripts_build_index/build_pylate_index.py \
+      --model-name lightonai/Reason-ModernColBERT \
+      --output-dir indexes/pylate/Reason-ModernColBERT \
+      --batch-size 100 \
+      --document-length 512
+```
+
+Else you can get the pre-computed index:
+```sh 
+/download_pylate_indexes.sh Reason-ModernColBERT
+```
+
+
+# Launching the runs
+
+## OSS-120B
+```sh
+# ── Configuration ────────────────────────────────────────────────────
+MODEL="openai/gpt-oss-120b"            # or openai/gpt-oss-120b
+VLLM_PORT=8005
+VLLM_TP_SIZE=2                        # tensor-parallel across GPUs 0,1
+
+# Reasoning effort: low | medium | high
+REASONING_EFFORT="high"
+
+MCP_PORT=8085
+NUM_THREADS=10
+# ─────────────────────────────────────────────────────────────────────
+
+echo "========================================"
+echo "Starting at: $(date)"
+echo "Model: $MODEL"
+echo "Reasoning effort: $REASONING_EFFORT"
+echo "========================================"
+
+conda activate browsecomp
+
+
+
+cd BrowseComp-Plus
+
+# ── Start vLLM (GPUs 0,1) ────────────────────────────────────────────
+CUDA_VISIBLE_DEVICES=0,1 vllm serve ${MODEL} \
+    --port ${VLLM_PORT} \
+    --reasoning-parser GptOss \
+    --tensor-parallel-size ${VLLM_TP_SIZE} &
+
+VLLM_PID=$!
+
+cleanup() {
+    echo "Cleaning up..."
+    kill ${VLLM_PID} 2>/dev/null
+    kill ${MCP_PID} 2>/dev/null
+    wait ${VLLM_PID} ${MCP_PID} 2>/dev/null
+}
+trap cleanup EXIT
+
+# Wait for vLLM to be ready
+echo "Waiting for vLLM to start..."
+until curl -s http://localhost:${VLLM_PORT}/health > /dev/null 2>&1; do
+    sleep 5
+done
+echo "vLLM is ready"
+
+
+# ── Run the OSS-GPT agent ───────────────────────────────────────────
+CUDA_VISIBLE_DEVICES=2 python search_agent/oss_client.py \
+    --model ${MODEL} \
+    --model-url http://localhost:${VLLM_PORT}/v1 \
+    --reasoning-effort ${REASONING_EFFORT} \
+    --searcher-type pylate \
+    --index-path indexes/pylate/Reason-ModernColBERT \
+    --model-name lightonai/Reason-ModernColBERT \
+    --query-length 512 \
+    --get-document \
+    --output-dir runs/pylate_oss-gpt-20b-${REASONING_EFFORT}-120b-reason \
+    --query topics-qrels/queries.tsv \
+    --max-tokens 20000 \
+    --num-threads ${NUM_THREADS}
+```
+This uses 3 GPUs: 2 to get OSS with TP2 and one to run the PLAID MCP. 
+We could probably make it run on one or two.
+
+
+## GPT-5 
+```sh
+
+# ── Configuration ────────────────────────────────────────────────────
+MODEL="gpt-5"
+
+# Reasoning effort: low | medium | high
+REASONING_EFFORT="high"
+
+MCP_PORT=8090
+NUM_THREADS=2
+# ─────────────────────────────────────────────────────────────────────
+
+echo "========================================"
+echo "Model: $MODEL"
+echo "Reasoning effort: $REASONING_EFFORT"
+echo "Client: openai_client_with_mcp.py"
+echo "========================================"
+
+conda activate browsecomp
+
+
+cd BrowseComp-Plus
+
+# ── Start MCP retrieval server (GPU 0) ──────────────────────────────
+CUDA_VISIBLE_DEVICES=0 PYTHONUNBUFFERED=1 python searcher/mcp_server.py \
+    --searcher-type pylate \
+    --index-path indexes/pylate/Reason-ModernColBERT \
+    --model-name lightonai/Reason-ModernColBERT \
+    --query-length 512 \
+    --get-document \
+    --public \
+    --port ${MCP_PORT} 2>&1 | tee mcp_server.log &
+
+MCP_PID=$!
+
+cleanup() {
+    echo "Cleaning up..."
+    kill ${MCP_PID} 2>/dev/null
+    wait ${MCP_PID} 2>/dev/null
+}
+trap cleanup EXIT
+
+echo "Waiting for MCP server to start..."
+until (echo > /dev/tcp/127.0.0.1/${MCP_PORT}) 2>/dev/null; do
+    sleep 3
+done
+echo "MCP server is ready"
+
+# Wait for ngrok tunnel URL to appear in the log
+echo "Waiting for ngrok public URL..."
+MCP_URL=""
+for i in $(seq 1 30); do
+    MCP_URL=$(grep -oP 'Public MCP endpoint available at: \K\S+' mcp_server.log 2>/dev/null)
+    if [ -n "$MCP_URL" ]; then
+        break
+    fi
+    sleep 2
+done
+
+if [ -z "$MCP_URL" ]; then
+    echo "ERROR: Failed to get ngrok public URL after 60s. Check mcp_server.log"
+    exit 1
+fi
+echo "Public MCP URL: $MCP_URL"
+
+# ── Run the OpenAI client with MCP ──────────────────────────────────
+# OPENAI_API_KEY must be set in the environment or .env file
+
+python search_agent/openai_client_with_mcp.py \
+    --model ${MODEL} \
+    --reasoning-effort ${REASONING_EFFORT} \
+    --mcp-url "${MCP_URL}" \
+    --mcp-name browsecomp-plus \
+    --query-template QUERY_TEMPLATE \
+    --output-dir runs/pylate_gpt5-${REASONING_EFFORT}-reason-mcp \
+    --query topics-qrels/queries.tsv \
+    --num-threads ${NUM_THREADS}
+```
+
+This is using ngrok account to expose your MCP server to OpenAI servers. You thus need to create a ngrok account and add the key into the .env. 
+Note that there might be some failure if the tunnel goes down, so make sure to check your runs with check_failures and rerun after remove_fail_mcp.py.
+If you need higher concurrency, a solution is to use cloudflared to create the tunnel.
+
+Note that we lifted the max gen tokens limit for GPT-5. 2 or 3 queries fails due to context limit hit, so you'll have to rerun those with medium reasoning effort.
+
+
+Those examples are using `--get-document` option. Remove it if you want to run the standard scaffold without the get_document function (and use `--query-template QUERY_TEMPLATE_NO_GET_DOCUMENT`, only for OpenAI as Qwen is using tool discovery from the MCP server.)
