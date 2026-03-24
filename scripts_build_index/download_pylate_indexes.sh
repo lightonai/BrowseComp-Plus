@@ -2,7 +2,7 @@
 # Download PyLate indexes from HuggingFace
 # Usage: ./download_pylate_indexes.sh [index_name]
 # Without arguments, lists available indexes.
-# Example: ./download_pylate_indexes.sh LateOn-distilled
+# Example: ./download_pylate_indexes.sh Reason-ModernColBERT
 
 REPO="lightonai/browsecomp-plus-indexes"
 
